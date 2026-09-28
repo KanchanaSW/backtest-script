@@ -6,14 +6,13 @@
 //
 // STRATEGY LOGIC:
 // 1. HTF Sweep: Monitors previous completed 1-Hour High / Low for liquidity sweeps.
-// 2. Market Structure Shift (MSS): Reversal confirmed by crossing recent pivot swing.
-// 3. FVG Confirmation: Enters on Fair Value Gap formation.
+// 2. Market Structure Shift (MSS): Reversal confirmed within a timeout window.
+// 3. FVG Confirmation: Enters on Fair Value Gap formation without chasing.
 // 4. Pro Risk & Trade Management:
-//    - TP1: Partial profit scale-out (50% default).
-//    - Break-Even: Stop loss moved to entry price once TP1 is hit.
-//    - Trailing Stop: Trails runner with ATR distance after TP1.
-//    - Circuit Breaker: Max consecutive daily loss limit.
-//    - Weekend Flatten: Closes open positions Friday afternoon.
+//    - Choice of Structural Stop Loss (behind Sweep Wick) or ATR Distance.
+//    - Single Target (max win rate) or Partial Scale-Out (TP1 + Trailing Runner).
+//    - Break-Even Offset (+0.1 ATR) to avoid BE counting as a loss in TradingView.
+//    - Session Killzones (London/NY) & Trend Bias Filter to avoid low-liquidity chop.
 // ==========================================================================================
 
 strategy("Merged 1H Sweep + Pro Management [Fast]", 
@@ -38,12 +37,16 @@ units_per_lot = input.float(100.0, "Units per Lot (100=Gold, 100000=Forex)", min
 
 // --- Risk & Management ---
 grpRisk        = "Risk & Trade Management"
-atr_sl_mult    = input.float(2.5, "ATR Stop Loss Multiplier", minval=0.5, step=0.1, group=grpRisk)
-tp1_ratio      = input.float(1.5, "TP1 Risk/Reward Ratio", minval=0.5, step=0.1, group=grpRisk)
-tp2_ratio      = input.float(2.5, "TP2 Risk/Reward Ratio", minval=1.0, step=0.1, group=grpRisk)
+exit_mode      = input.string("Partial Scale-Out", "Exit Execution Mode", options=["Partial Scale-Out", "Single Target (High Win Rate)"], group=grpRisk, tooltip="Single Target exits 100% at TP1. Partial scales 50% at TP1 and trails the rest.")
+stop_mode      = input.string("Sweep Extreme", "Stop Loss Mode", options=["Sweep Extreme", "ATR Distance"], group=grpRisk, tooltip="Sweep Extreme anchors SL behind the liquidity sweep wick (authentic ICT invalidation).")
+sweep_buf_mult = input.float(0.15, "Sweep SL Buffer (x ATR)", minval=0.0, step=0.05, group=grpRisk, tooltip="Extra buffer added beyond the sweep wick for Stop Loss.")
+atr_sl_mult    = input.float(2.0, "ATR Stop Loss Multiplier", minval=0.5, step=0.1, group=grpRisk, tooltip="Used when Stop Loss Mode is ATR Distance or as fallback.")
+tp1_ratio      = input.float(1.0, "TP1 / Single Target R:R", minval=0.5, step=0.1, group=grpRisk, tooltip="Target Risk:Reward ratio. 1.0R - 1.2R significantly increases win rate.")
+tp2_ratio      = input.float(2.0, "TP2 Risk/Reward Ratio", minval=1.0, step=0.1, group=grpRisk, tooltip="Target for the runner in Partial Scale-Out mode.")
 scale_pct      = input.int(50, "TP1 Scale Out %", minval=10, maxval=90, group=grpRisk)
 use_trail      = input.bool(true, "Trail Stop Loss after TP1 Hit", group=grpRisk)
 trail_atr_mult = input.float(1.5, "Trailing ATR Multiplier", minval=0.5, step=0.1, group=grpRisk)
+be_offset_atr  = input.float(0.1, "Break-Even Offset (x ATR)", minval=0.0, step=0.05, group=grpRisk, tooltip="Moves stop slightly past entry after TP1 so break-even is recorded as a win.")
 max_daily_loss = input.int(2, "Max Consecutive Daily Losses", minval=1, group=grpRisk)
 close_friday   = input.bool(true, "Close All Trades Friday at 16:00", group=grpRisk)
 
@@ -51,17 +54,18 @@ close_friday   = input.bool(true, "Close All Trades Friday at 16:00", group=grpR
 grpSetup       = "ICT Strategy & Filters"
 htf            = input.timeframe("60", "HTF Sweep Timeframe", group=grpSetup)
 swing_len      = input.int(3, "Swing Pivot Length", minval=1, maxval=10, group=grpSetup)
-fvg_timeout    = input.int(10, "Max Bars to Wait for FVG", minval=3, maxval=30, group=grpSetup)
-use_vol        = input.bool(false, "Use Volume Filter", group=grpSetup, tooltip="Require volume above MA. Keep false if trading Forex without centralized volume.")
-vol_length     = input.int(30, "Volume MA Length", minval=5, group=grpSetup)
-use_bias       = input.bool(false, "Use Daily Trend Filter", group=grpSetup, tooltip="Require longs above and shorts below Daily EMA.")
+max_sweep_bars = input.int(15, "Max Bars from Sweep to Shift", minval=3, maxval=50, group=grpSetup, tooltip="Invalidates old sweeps if a shift does not happen promptly.")
+fvg_timeout    = input.int(12, "Max Bars to Wait for FVG", minval=3, maxval=30, group=grpSetup)
+max_chase_atr  = input.float(0.75, "Max Chase From Sweep (0 = Disabled)", minval=0.0, step=0.25, group=grpSetup, tooltip="Prevents entering if price has already moved too far from the sweep wick.")
+use_bias       = input.bool(true, "Use Daily Trend Filter", group=grpSetup, tooltip="Require longs above and shorts below Daily EMA.")
 bias_tf        = input.timeframe("D", "Trend Timeframe", group=grpSetup)
 bias_length    = input.int(20, "Trend EMA Length", group=grpSetup)
-max_chase_atr  = input.float(0.0, "Max Chase From Sweep (0 = Disabled)", minval=0.0, step=0.25, group=grpSetup, tooltip="Set to 0 to disable chase filter. Values below 1.5 can filter out most valid trades.")
+use_vol        = input.bool(false, "Use Volume Filter", group=grpSetup, tooltip="Require volume above MA. Keep false if trading Forex without centralized tick volume.")
+vol_length     = input.int(14, "Volume MA Length", minval=5, group=grpSetup)
 
 // --- Session Filter ---
 grpSess        = "Trading Session"
-use_session    = input.bool(false, "Use Session Time Filter", group=grpSess)
+use_session    = input.bool(true, "Use Session Time Filter", group=grpSess, tooltip="Filters out low-liquidity overnight chop. Default: 03:00-12:00 NY covers London & NY opens.")
 trading_hours  = input.session("0300-1200", "Trading Hours (NY Time)", group=grpSess)
 session_tz     = input.string("America/New_York", "Timezone", group=grpSess)
 
@@ -84,7 +88,6 @@ calc_order_qty() =>
     math.max(qty, syminfo.mincontract)
 
 atr_val     = ta.atr(14)
-sl_distance = atr_val * atr_sl_mult
 trail_dist  = atr_val * trail_atr_mult
 vol_ma      = ta.sma(volume, vol_length)
 
@@ -128,26 +131,39 @@ if not na(pl)
 bullish_sweep = low < htf_low and close > htf_low
 bearish_sweep = high > htf_high and close < htf_high
 
-var bool  swept_bullish       = false
-var bool  swept_bearish       = false
-var float sweep_low_val       = na
-var float sweep_high_val      = na
-var float armed_bull_extreme  = na
-var float armed_bear_extreme  = na
+var bool  swept_bullish        = false
+var bool  swept_bearish        = false
+var float sweep_low_val        = na
+var float sweep_high_val       = na
+var float armed_bull_extreme   = na
+var float armed_bear_extreme   = na
+var int   bars_since_sweep_bull = 0
+var int   bars_since_sweep_bear = 0
 
 if bullish_sweep
-    swept_bullish  := true
-    swept_bearish  := false
-    sweep_low_val  := low
-if bearish_sweep
-    swept_bearish  := true
-    swept_bullish  := false
-    sweep_high_val := high
+    swept_bullish         := true
+    swept_bearish         := false
+    sweep_low_val         := low
+    bars_since_sweep_bull := 0
+else if swept_bullish
+    bars_since_sweep_bull += 1
+    if low < sweep_low_val and close > htf_low
+        sweep_low_val := low // Update to deepest sweep wick
 
-// Invalidate if price pushes past sweep extreme prior to shift
-if swept_bullish and close < sweep_low_val
+if bearish_sweep
+    swept_bearish         := true
+    swept_bullish         := false
+    sweep_high_val        := high
+    bars_since_sweep_bear := 0
+else if swept_bearish
+    bars_since_sweep_bear += 1
+    if high > sweep_high_val and close < htf_high
+        sweep_high_val := high // Update to highest sweep wick
+
+// Invalidate sweep if price closes past extreme or times out
+if swept_bullish and (close < sweep_low_val or bars_since_sweep_bull > max_sweep_bars)
     swept_bullish := false
-if swept_bearish and close > sweep_high_val
+if swept_bearish and (close > sweep_high_val or bars_since_sweep_bear > max_sweep_bars)
     swept_bearish := false
 
 // Market Structure Shift
@@ -222,32 +238,49 @@ var box tp2_box      = na
 // --- LONG ENTRY ---
 if buy_signal
     entry_p    := close
-    sl_p       := entry_p - sl_distance
-    tp1_p      := entry_p + (sl_distance * tp1_ratio)
-    tp2_p      := entry_p + (sl_distance * tp2_ratio)
+
+    // Calculate Stop Loss
+    float cur_sl_dist = atr_val * atr_sl_mult
+    if stop_mode == "Sweep Extreme" and not na(armed_bull_extreme)
+        tentative_sl = armed_bull_extreme - (atr_val * sweep_buf_mult)
+        if tentative_sl < entry_p
+            sl_p := tentative_sl
+            cur_sl_dist := entry_p - sl_p
+        else
+            sl_p := entry_p - cur_sl_dist
+    else
+        sl_p := entry_p - cur_sl_dist
+
+    tp1_p      := entry_p + (cur_sl_dist * tp1_ratio)
+    tp2_p      := entry_p + (cur_sl_dist * tp2_ratio)
     target_qty := calc_order_qty()
     qty1       := target_qty * (scale_pct / 100.0)
     qty2       := target_qty - qty1
     tp1_hit    := false
 
     strategy.entry("Long", strategy.long, qty=target_qty)
-    strategy.exit("TP1", "Long", qty=qty1, stop=sl_p, limit=tp1_p)
-    strategy.exit("TP2", "Long", stop=sl_p, limit=tp2_p)
 
-    label.new(bar_index, low - atr_val, text="BUY\nSL: " + str.tostring(sl_p, "#.##") + "\nTP1: " + str.tostring(tp1_p, "#.##"), 
+    if exit_mode == "Single Target (High Win Rate)"
+        strategy.exit("TP-All", "Long", stop=sl_p, limit=tp1_p)
+    else
+        strategy.exit("TP1", "Long", qty=qty1, stop=sl_p, limit=tp1_p)
+        strategy.exit("TP2", "Long", stop=sl_p, limit=tp2_p)
+
+    label.new(bar_index, low - atr_val, text="BUY\nSL: " + str.tostring(sl_p, "#.##") + "\nTP: " + str.tostring(tp1_p, "#.##"), 
               style=label.style_label_up, color=color.new(#089981, 0), textcolor=color.white, size=size.small)
 
     if show_boxes
         sl_box  := box.new(left=bar_index, top=entry_p, right=bar_index + 1, bottom=sl_p, bgcolor=color.new(color.red, 80), border_color=color.new(color.red, 50))
         tp1_box := box.new(left=bar_index, top=tp1_p, right=bar_index + 1, bottom=entry_p, bgcolor=color.new(#089981, 70), border_color=color.new(#089981, 50))
-        tp2_box := box.new(left=bar_index, top=tp2_p, right=bar_index + 1, bottom=tp1_p, bgcolor=color.new(#089981, 85), border_color=color.new(#089981, 50))
+        if exit_mode != "Single Target (High Win Rate)"
+            tp2_box := box.new(left=bar_index, top=tp2_p, right=bar_index + 1, bottom=tp1_p, bgcolor=color.new(#089981, 85), border_color=color.new(#089981, 50))
 
 // Manage Active Long
-if strategy.position_size > 0
+if strategy.position_size > 0 and exit_mode == "Partial Scale-Out"
     if not tp1_hit and high >= tp1_p
         tp1_hit := true
         if use_trail
-            sl_p := entry_p // Move stop to Break-Even
+            sl_p := entry_p + (atr_val * be_offset_atr) // Break-Even with small profit offset
 
     if tp1_hit and use_trail
         new_trail = high - trail_dist
@@ -263,32 +296,49 @@ if strategy.position_size > 0
 // --- SHORT ENTRY ---
 if sell_signal
     entry_p    := close
-    sl_p       := entry_p + sl_distance
-    tp1_p      := entry_p - (sl_distance * tp1_ratio)
-    tp2_p      := entry_p - (sl_distance * tp2_ratio)
+
+    // Calculate Stop Loss
+    float cur_sl_dist = atr_val * atr_sl_mult
+    if stop_mode == "Sweep Extreme" and not na(armed_bear_extreme)
+        tentative_sl = armed_bear_extreme + (atr_val * sweep_buf_mult)
+        if tentative_sl > entry_p
+            sl_p := tentative_sl
+            cur_sl_dist := sl_p - entry_p
+        else
+            sl_p := entry_p + cur_sl_dist
+    else
+        sl_p := entry_p + cur_sl_dist
+
+    tp1_p      := entry_p - (cur_sl_dist * tp1_ratio)
+    tp2_p      := entry_p - (cur_sl_dist * tp2_ratio)
     target_qty := calc_order_qty()
     qty1       := target_qty * (scale_pct / 100.0)
     qty2       := target_qty - qty1
     tp1_hit    := false
 
     strategy.entry("Short", strategy.short, qty=target_qty)
-    strategy.exit("TP1", "Short", qty=qty1, stop=sl_p, limit=tp1_p)
-    strategy.exit("TP2", "Short", stop=sl_p, limit=tp2_p)
 
-    label.new(bar_index, high + atr_val, text="SELL\nSL: " + str.tostring(sl_p, "#.##") + "\nTP1: " + str.tostring(tp1_p, "#.##"), 
+    if exit_mode == "Single Target (High Win Rate)"
+        strategy.exit("TP-All", "Short", stop=sl_p, limit=tp1_p)
+    else
+        strategy.exit("TP1", "Short", qty=qty1, stop=sl_p, limit=tp1_p)
+        strategy.exit("TP2", "Short", stop=sl_p, limit=tp2_p)
+
+    label.new(bar_index, high + atr_val, text="SELL\nSL: " + str.tostring(sl_p, "#.##") + "\nTP: " + str.tostring(tp1_p, "#.##"), 
               style=label.style_label_down, color=color.new(#f23645, 0), textcolor=color.white, size=size.small)
 
     if show_boxes
         sl_box  := box.new(left=bar_index, top=sl_p, right=bar_index + 1, bottom=entry_p, bgcolor=color.new(color.red, 80), border_color=color.new(color.red, 50))
         tp1_box := box.new(left=bar_index, top=entry_p, right=bar_index + 1, bottom=tp1_p, bgcolor=color.new(#089981, 70), border_color=color.new(#089981, 50))
-        tp2_box := box.new(left=bar_index, top=tp1_p, right=bar_index + 1, bottom=tp2_p, bgcolor=color.new(#089981, 85), border_color=color.new(#089981, 50))
+        if exit_mode != "Single Target (High Win Rate)"
+            tp2_box := box.new(left=bar_index, top=tp1_p, right=bar_index + 1, bottom=tp2_p, bgcolor=color.new(#089981, 85), border_color=color.new(#089981, 50))
 
 // Manage Active Short
-if strategy.position_size < 0
+if strategy.position_size < 0 and exit_mode == "Partial Scale-Out"
     if not tp1_hit and low <= tp1_p
         tp1_hit := true
         if use_trail
-            sl_p := entry_p // Move stop to Break-Even
+            sl_p := entry_p - (atr_val * be_offset_atr) // Break-Even with small profit offset
 
     if tp1_hit and use_trail
         new_trail = low + trail_dist
