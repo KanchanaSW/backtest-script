@@ -1,93 +1,91 @@
 //@version=6
 // ==========================================================================================
-// Merged 1H Sweep + Pro Management + Volume Filter [Optimized]
-// Asset: XAUUSD (Gold)
+// Merged 1H Sweep + Pro Management [Clean & Fast Edition]
+// Compatible Assets: XAUUSD (Gold), Forex (EURUSD, GBPUSD), Crypto, Indices
 // Recommended Timeframe: 5-minute (M5)
 //
-// STRATEGY OVERVIEW:
-// 1. HTF Sweep: Monitors previous completed 1-Hour High / Low for liquidity sweep.
-// 2. Reversal Confirmation: Waits for a Market Structure Shift (MSS) crossing pivot swings.
-// 3. FVG Entry: Enters when a Fair Value Gap aligns with volume above moving average.
-// 4. Trend & Chase Filters: Validates direction via Daily EMA and bounds entry chase distance.
-// 5. Pro Management:
-//    - Takes 50% partial profit at TP1 (1.5R default).
-//    - Raises runner Stop Loss to Break-Even upon TP1 hit.
-//    - Trails runner using 1.5 * ATR trailing distance to TP2 (2.5R default).
-//    - Enforces a 2-consecutive-loss daily circuit breaker and Friday 16:00 weekend close.
+// STRATEGY LOGIC:
+// 1. HTF Sweep: Monitors previous completed 1-Hour High / Low for liquidity sweeps.
+// 2. Market Structure Shift (MSS): Reversal confirmed by crossing recent pivot swing.
+// 3. FVG Confirmation: Enters on Fair Value Gap formation.
+// 4. Pro Risk & Trade Management:
+//    - TP1: Partial profit scale-out (50% default).
+//    - Break-Even: Stop loss moved to entry price once TP1 is hit.
+//    - Trailing Stop: Trails runner with ATR distance after TP1.
+//    - Circuit Breaker: Max consecutive daily loss limit.
+//    - Weekend Flatten: Closes open positions Friday afternoon.
 // ==========================================================================================
 
-strategy("Merged 1H Sweep + Pro Management [Optimized]", 
+strategy("Merged 1H Sweep + Pro Management [Fast]", 
          overlay=true, 
          initial_capital=5000, 
-         default_qty_type=strategy.fixed, 
+         default_qty_type=strategy.percent_of_equity, 
          default_qty_value=10, 
          margin_long=0, 
          margin_short=0, 
          process_orders_on_close=false,
          max_labels_count=500, 
-         max_boxes_count=500, 
-         max_lines_count=500)
+         max_boxes_count=500)
 
 // ============================ INPUTS ============================
-// --- Date Range Filter ---
-grpD           = "Backtest Date Filter"
-use_date_range = input.bool(false, "Filter Date Range", group=grpD)
-start_date     = input.time(timestamp("2020-01-01 00:00"), "Start Date", group=grpD)
-end_date       = input.time(timestamp("2030-01-01 00:00"), "End Date", group=grpD)
+// --- Sizing Mode ---
+grpSize       = "Position Sizing"
+sizing_mode   = input.string("Percent of Equity", "Sizing Mode", options=["Percent of Equity", "Fixed Quantity", "Lots (Gold / FX)"], group=grpSize)
+equity_pct    = input.float(10.0, "Equity % per Trade", minval=1.0, maxval=100.0, group=grpSize)
+fixed_qty     = input.float(1.0, "Fixed Quantity / Contracts", minval=0.001, group=grpSize)
+lot_size      = input.float(0.1, "Lot Size", minval=0.01, group=grpSize)
+units_per_lot = input.float(100.0, "Units per Lot (100=Gold, 100000=Forex)", minval=1.0, group=grpSize)
 
-// --- Risk & Sizing ---
-account_size  = input.float(5000.0, "Account Size ($)", group="Risk Management")
-lot_size      = input.float(0.1, "Fixed Lot Size", group="Risk Management")
-units_per_lot = input.float(100.0, "Units per 1 Lot (100 = Gold)", group="Risk Management")
-atr_sl_mult   = input.float(2.5, "ATR Stop Loss Multiplier", group="Risk Management")
+// --- Risk & Management ---
+grpRisk        = "Risk & Trade Management"
+atr_sl_mult    = input.float(2.5, "ATR Stop Loss Multiplier", minval=0.5, step=0.1, group=grpRisk)
+tp1_ratio      = input.float(1.5, "TP1 Risk/Reward Ratio", minval=0.5, step=0.1, group=grpRisk)
+tp2_ratio      = input.float(2.5, "TP2 Risk/Reward Ratio", minval=1.0, step=0.1, group=grpRisk)
+scale_pct      = input.int(50, "TP1 Scale Out %", minval=10, maxval=90, group=grpRisk)
+use_trail      = input.bool(true, "Trail Stop Loss after TP1 Hit", group=grpRisk)
+trail_atr_mult = input.float(1.5, "Trailing ATR Multiplier", minval=0.5, step=0.1, group=grpRisk)
+max_daily_loss = input.int(2, "Max Consecutive Daily Losses", minval=1, group=grpRisk)
+close_friday   = input.bool(true, "Close All Trades Friday at 16:00", group=grpRisk)
 
-// --- Pro Trade Management ---
-tp1_ratio      = input.float(1.5, "TP1 Risk/Reward Ratio", group="Trade Management")
-tp2_ratio      = input.float(2.5, "TP2 Risk/Reward Ratio", group="Trade Management")
-scale_pct      = input.int(50, "TP1 Scale Out %", minval=10, maxval=90, group="Trade Management")
-use_trail      = input.bool(true, "Trail Stop Loss after TP1 Hit", group="Trade Management")
-trail_atr_mult = input.float(1.5, "Trailing ATR Multiplier", group="Trade Management")
-max_daily_loss = input.int(2, "Max Consecutive Daily Losses", group="Trade Management")
-close_friday   = input.bool(true, "Close All Trades Friday at 16:00", group="Trade Management")
+// --- Setup & ICT Filters ---
+grpSetup       = "ICT Strategy & Filters"
+htf            = input.timeframe("60", "HTF Sweep Timeframe", group=grpSetup)
+swing_len      = input.int(3, "Swing Pivot Length", minval=1, maxval=10, group=grpSetup)
+fvg_timeout    = input.int(10, "Max Bars to Wait for FVG", minval=3, maxval=30, group=grpSetup)
+use_vol        = input.bool(false, "Use Volume Filter", group=grpSetup, tooltip="Require volume above MA. Keep false if trading Forex without centralized volume.")
+vol_length     = input.int(30, "Volume MA Length", minval=5, group=grpSetup)
+use_bias       = input.bool(false, "Use Daily Trend Filter", group=grpSetup, tooltip="Require longs above and shorts below Daily EMA.")
+bias_tf        = input.timeframe("D", "Trend Timeframe", group=grpSetup)
+bias_length    = input.int(20, "Trend EMA Length", group=grpSetup)
+max_chase_atr  = input.float(0.0, "Max Chase From Sweep (0 = Disabled)", minval=0.0, step=0.25, group=grpSetup, tooltip="Set to 0 to disable chase filter. Values below 1.5 can filter out most valid trades.")
 
-// --- Filters & Strategy ---
-use_session    = input.bool(false, "Use Trading Session Filter", group="Filters", tooltip="Disable to allow trades 24/5 (matches best backtest params). Enable to restrict to NY hours.")
-trading_hours  = input.session("0300-1200", "Trading Hours (NY Time)", group="Filters")
-session_tz     = input.string("America/New_York", "Timezone", group="Filters")
+// --- Session Filter ---
+grpSess        = "Trading Session"
+use_session    = input.bool(false, "Use Session Time Filter", group=grpSess)
+trading_hours  = input.session("0300-1200", "Trading Hours (NY Time)", group=grpSess)
+session_tz     = input.string("America/New_York", "Timezone", group=grpSess)
 
-use_vol        = input.bool(true, "Use Volume Filter", group="Filters")
-vol_length     = input.int(30, "Volume MA Length", group="Filters")
-use_bias       = input.bool(true, "Trade With Higher-Timeframe Trend", group="Filters")
-bias_tf        = input.timeframe("D", "Trend Timeframe", group="Filters")
-bias_length    = input.int(20, "Trend EMA Length", group="Filters")
-max_chase_atr  = input.float(0.75, "Max Chase From Sweep (ATR)", minval=0.0, group="Filters")
-
-htf            = input.timeframe("60", "Higher Timeframe (HTF) Sweep", group="ICT Strategy Settings")
-swing_len      = input.int(3, "Swing Length for Shift", group="ICT Strategy Settings")
-fvg_timeout    = input.int(10, "Max Bars to Wait for FVG", group="ICT Strategy Settings")
-show_boxes     = input.bool(true, "Draw Risk/Reward Boxes", group="Visuals")
-show_dashboard = input.bool(true, "Show Strategy Performance Table", group="Visuals")
-
-// --- Optional Volume Profile & Confidence Score ---
-grpP           = "Optional Volume Profile (Advanced)"
-enable_vp      = input.bool(false, "Enable Intrabar Volume Profile", group=grpP, tooltip="Enable to compute intrabar POC/Value Area. Kept off by default for faster chart loading.")
-sessDef        = input.string("Chart day", "Session boundary", options=["Chart day", "Custom start hour"], group=grpP)
-sessHour       = input.int(0, "Custom start hour (0-23)", minval=0, maxval=23, group=grpP)
-sessTz         = input.string("Exchange", "Custom hour timezone", options=["Exchange", "UTC", "America/New_York", "Europe/London"], group=grpP)
-vpRows         = input.int(60, "Row size", minval=10, maxval=200, group=grpP)
-vaPct          = input.float(70.0, "Value area volume %", minval=50.0, maxval=95.0, step=1.0, group=grpP)
-ltfTf          = input.timeframe("1", "Intrabar timeframe", group=grpP)
-showLvl        = input.bool(true, "Show POC Line when VP enabled", group=grpP)
+// --- Visuals ---
+grpVis         = "Visuals"
+show_boxes     = input.bool(true, "Draw Risk/Reward Boxes", group=grpVis)
+show_dashboard = input.bool(true, "Show Performance Dashboard", group=grpVis)
 
 // ============================ CALCULATIONS ============================
-actual_qty  = lot_size * units_per_lot
-qty1        = actual_qty * (scale_pct / 100.0)
-qty2        = actual_qty - qty1
+// Order quantity calculation based on user selection
+calc_order_qty() =>
+    qty = 1.0
+    if sizing_mode == "Percent of Equity"
+        notional = strategy.equity * (equity_pct / 100.0)
+        qty := notional / close
+    else if sizing_mode == "Fixed Quantity"
+        qty := fixed_qty
+    else
+        qty := lot_size * units_per_lot
+    math.max(qty, syminfo.mincontract)
 
 atr_val     = ta.atr(14)
 sl_distance = atr_val * atr_sl_mult
 trail_dist  = atr_val * trail_atr_mult
-
 vol_ma      = ta.sma(volume, vol_length)
 
 // ============================ CIRCUIT BREAKER ============================
@@ -111,112 +109,12 @@ is_friday_close = close_friday and dayofweek == dayofweek.friday and hour >= 16
 if is_friday_close
     strategy.close_all(comment="Weekend Flatten")
 
-// ============================ VOLUME PROFILE ENGINE ============================
-tzUse   = sessTz == "Exchange" ? syminfo.timezone : sessTz
-shifted = time - sessHour * 3600000
-custId  = year(shifted, tzUse) * 10000 + month(shifted, tzUse) * 100 + dayofmonth(shifted, tzUse)
-sessNew = sessDef == "Custom start hour" ? (not na(custId[1]) and custId != custId[1]) : timeframe.change("1D")
+// ============================ HTF LEVELS & SWEEP LOGIC ============================
+// Non-repainting previous completed HTF bar levels
+htf_high = request.security(syminfo.tickerid, htf, high[1], barmerge.gaps_off, barmerge.lookahead_off)
+htf_low  = request.security(syminfo.tickerid, htf, low[1], barmerge.gaps_off, barmerge.lookahead_off)
 
-ltfOk = enable_vp and timeframe.in_seconds(ltfTf) < timeframe.in_seconds(timeframe.period)
-array<float> iLo = array.new<float>()
-array<float> iHi = array.new<float>()
-array<float> iVo = array.new<float>()
-if ltfOk
-    [a, b, c] = request.security_lower_tf(syminfo.tickerid, ltfTf, [low, high, volume])
-    iLo := a
-    iHi := b
-    iVo := c
-
-profile(array<float> lo, array<float> hi, array<float> vol) =>
-    float poc  = na
-    float vah  = na
-    float val  = na
-    float rMin = na
-    float step = na
-    vp = array.new<float>()
-    n  = lo.size()
-    if n > 0
-        rMin := lo.min()
-        rMax  = hi.max()
-        step := (rMax - rMin) / vpRows
-        if step > 0
-            vp := array.new<float>(vpRows, 0.0)
-            for k = 0 to n - 1
-                b0  = math.max(0, math.min(vpRows - 1, math.floor((lo.get(k) - rMin) / step)))
-                b1  = math.max(0, math.min(vpRows - 1, math.floor((hi.get(k) - rMin) / step)))
-                per = vol.get(k) / (b1 - b0 + 1)
-                for b = b0 to b1
-                    vp.set(b, vp.get(b) + per)
-            pocI   = vp.indexof(vp.max())
-            target = vp.sum() * vaPct / 100.0
-            upI = pocI
-            loI = pocI
-            acc = vp.get(pocI)
-            while acc < target and (upI < vpRows - 1 or loI > 0)
-                upV = 0.0
-                loV = 0.0
-                upN = 0
-                loN = 0
-                for j = 1 to 2
-                    if upI + j <= vpRows - 1
-                        upV += vp.get(upI + j)
-                        upN += 1
-                    if loI - j >= 0
-                        loV += vp.get(loI - j)
-                        loN += 1
-                if upN > 0 and (loN == 0 or upV >= loV)
-                    upI += upN
-                    acc += upV
-                else
-                    loI -= loN
-                    acc += loV
-            poc := rMin + (pocI + 0.5) * step
-            vah := rMin + (upI + 1) * step
-            val := rMin + loI * step
-    [poc, vah, val]
-
-var array<float> aLo = array.new<float>()
-var array<float> aHi = array.new<float>()
-var array<float> aVo = array.new<float>()
-var bool  fullSess   = false
-var float pPoc       = na
-var float pVah       = na
-var float pVal       = na
-
-if enable_vp and barstate.isconfirmed
-    if sessNew
-        if fullSess and aLo.size() > 0
-            [poc, vah, val] = profile(aLo, aHi, aVo)
-            if not na(poc)
-                pPoc := poc
-                pVah := vah
-                pVal := val
-        aLo.clear()
-        aHi.clear()
-        aVo.clear()
-        fullSess := true
-
-    if ltfOk and iLo.size() > 0
-        for k = 0 to iLo.size() - 1
-            v = iVo.get(k)
-            aLo.push(iLo.get(k))
-            aHi.push(iHi.get(k))
-            aVo.push(nz(v) > 0 ? v : 1e-9)
-    else
-        aLo.push(low)
-        aHi.push(high)
-        aVo.push(nz(volume) > 0 ? volume : 1e-9)
-
-plot(enable_vp and showLvl and not sessNew ? pPoc : na, "Prev POC", color.new(#ff1744, 20), 2, plot.style_linebr)
-
-// ============================ STRATEGY SIGNALS ============================
-in_date_range = not use_date_range or (time >= start_date and time <= end_date)
-in_session    = use_session ? not na(time(timeframe.period, trading_hours, session_tz)) : true
-can_enter     = in_date_range and in_session and strategy.position_size == 0 and can_trade and not is_friday_close
-
-htf_high = request.security(syminfo.tickerid, htf, high[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-htf_low  = request.security(syminfo.tickerid, htf, low[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-
+// Swing pivots for MSS
 ph = ta.pivothigh(high, swing_len, swing_len)
 pl = ta.pivotlow(low, swing_len, swing_len)
 
@@ -230,33 +128,35 @@ if not na(pl)
 bullish_sweep = low < htf_low and close > htf_low
 bearish_sweep = high > htf_high and close < htf_high
 
-var bool swept_bullish       = false
-var bool swept_bearish       = false
-var float sweep_low_val      = na
-var float sweep_high_val     = na
-var float armed_bull_extreme = na
-var float armed_bear_extreme = na
+var bool  swept_bullish       = false
+var bool  swept_bearish       = false
+var float sweep_low_val       = na
+var float sweep_high_val      = na
+var float armed_bull_extreme  = na
+var float armed_bear_extreme  = na
 
 if bullish_sweep
-    swept_bullish := true
-    swept_bearish := false
-    sweep_low_val := low
+    swept_bullish  := true
+    swept_bearish  := false
+    sweep_low_val  := low
 if bearish_sweep
-    swept_bearish := true
-    swept_bullish := false
+    swept_bearish  := true
+    swept_bullish  := false
     sweep_high_val := high
 
+// Invalidate if price pushes past sweep extreme prior to shift
 if swept_bullish and close < sweep_low_val
     swept_bullish := false
 if swept_bearish and close > sweep_high_val
     swept_bearish := false
 
+// Market Structure Shift
 bullish_shift = swept_bullish and ta.crossover(close, last_ph)
 bearish_shift = swept_bearish and ta.crossunder(close, last_pl)
 
 var bool wait_for_fvg_bull = false
 var bool wait_for_fvg_bear = false
-var int bars_since_shift   = 0
+var int  bars_since_shift  = 0
 
 if bullish_shift
     wait_for_fvg_bull  := true
@@ -276,135 +176,132 @@ if bars_since_shift > fvg_timeout
     wait_for_fvg_bull := false
     wait_for_fvg_bear := false
 
+// ============================ ENTRY CONDITIONS ============================
+// Standard ICT Fair Value Gap
 fvg_bull = low > high[2] and close[1] > open[1]
 fvg_bear = high < low[2] and close[1] < open[1]
 
-vol_cond = use_vol ? volume > vol_ma : true
+vol_cond = not use_vol or (volume > vol_ma)
 
-bias_ema    = request.security(syminfo.tickerid, bias_tf, ta.ema(close, bias_length)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+bias_ema    = request.security(syminfo.tickerid, bias_tf, ta.ema(close, bias_length)[1], barmerge.gaps_off, barmerge.lookahead_off)
 long_trend  = not use_bias or (not na(bias_ema) and close > bias_ema)
 short_trend = not use_bias or (not na(bias_ema) and close < bias_ema)
 
 long_chase  = max_chase_atr <= 0 or (not na(armed_bull_extreme) and (close - armed_bull_extreme) <= (atr_val * max_chase_atr))
 short_chase = max_chase_atr <= 0 or (not na(armed_bear_extreme) and (armed_bear_extreme - close) <= (atr_val * max_chase_atr))
 
-bull_setup  = wait_for_fvg_bull and fvg_bull and vol_cond and can_enter
-bear_setup  = wait_for_fvg_bear and fvg_bear and vol_cond and can_enter
+in_session  = not use_session or not na(time(timeframe.period, trading_hours, session_tz))
+can_enter   = in_session and strategy.position_size == 0 and can_trade and not is_friday_close
 
-buy_signal  = bull_setup and long_trend and long_chase
-sell_signal = bear_setup and short_trend and short_chase
+buy_signal  = wait_for_fvg_bull and fvg_bull and vol_cond and long_trend and long_chase and can_enter
+sell_signal = wait_for_fvg_bear and fvg_bear and vol_cond and short_trend and short_chase and can_enter
 
-if bull_setup
-    wait_for_fvg_bull := false
-if bear_setup
-    wait_for_fvg_bear := false
-
-// ============================ CONFIDENCE SCORING ============================
-get_confidence(bool is_buy) =>
-    prob = 65
-    if use_vol and volume > vol_ma
-        prob += 10
-    if enable_vp and not na(pPoc)
-        if is_buy and close <= pPoc
-            prob += 10
-        if not is_buy and close >= pPoc
-            prob += 10
-    if enable_vp and not na(pVal) and not na(pVah) and close >= pVal and close <= pVah
-        prob += 10
-    math.min(prob, 95)
-
-// ============================ ORDER EXECUTION & MANAGEMENT ============================
-var float entry_p = na
-var float sl_p    = na
-var float tp1_p   = na
-var float tp2_p   = na
-var bool  tp1_hit = false
-
-var box sl_box    = na
-var box tp1_box   = na
-var box tp2_box   = na
-
-// --- BUY ORDER LOGIC ---
 if buy_signal
     wait_for_fvg_bull := false
-    entry_p := close
-    sl_p    := entry_p - sl_distance
-    tp1_p   := entry_p + (sl_distance * tp1_ratio)
-    tp2_p   := entry_p + (sl_distance * tp2_ratio)
-    tp1_hit := false
-    
-    strategy.entry("Long", strategy.long, qty=actual_qty)
+if sell_signal
+    wait_for_fvg_bear := false
+
+// Visual arrows on chart
+plotshape(buy_signal, title="Buy Signal", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(sell_signal, title="Sell Signal", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)
+
+// ============================ EXECUTION ENGINE ============================
+var float entry_p    = na
+var float sl_p       = na
+var float tp1_p      = na
+var float tp2_p      = na
+var float target_qty = na
+var float qty1       = na
+var float qty2       = na
+var bool  tp1_hit    = false
+
+var box sl_box       = na
+var box tp1_box      = na
+var box tp2_box      = na
+
+// --- LONG ENTRY ---
+if buy_signal
+    entry_p    := close
+    sl_p       := entry_p - sl_distance
+    tp1_p      := entry_p + (sl_distance * tp1_ratio)
+    tp2_p      := entry_p + (sl_distance * tp2_ratio)
+    target_qty := calc_order_qty()
+    qty1       := target_qty * (scale_pct / 100.0)
+    qty2       := target_qty - qty1
+    tp1_hit    := false
+
+    strategy.entry("Long", strategy.long, qty=target_qty)
     strategy.exit("TP1", "Long", qty=qty1, stop=sl_p, limit=tp1_p)
-    strategy.exit("TP2", "Long", stop=sl_p, limit=tp2_p) 
-    
-    conf = get_confidence(true)
-    lbl_text = str.tostring(conf) + "% BUY\nSL: " + str.tostring(sl_p, "#.##") + "\nTP1: " + str.tostring(tp1_p, "#.##")
-    label.new(bar_index, low - atr_val, text=lbl_text, style=label.style_label_up, color=color.new(#089981, 0), textcolor=color.white, size=size.small)
-    
+    strategy.exit("TP2", "Long", stop=sl_p, limit=tp2_p)
+
+    label.new(bar_index, low - atr_val, text="BUY\nSL: " + str.tostring(sl_p, "#.##") + "\nTP1: " + str.tostring(tp1_p, "#.##"), 
+              style=label.style_label_up, color=color.new(#089981, 0), textcolor=color.white, size=size.small)
+
     if show_boxes
         sl_box  := box.new(left=bar_index, top=entry_p, right=bar_index + 1, bottom=sl_p, bgcolor=color.new(color.red, 80), border_color=color.new(color.red, 50))
         tp1_box := box.new(left=bar_index, top=tp1_p, right=bar_index + 1, bottom=entry_p, bgcolor=color.new(#089981, 70), border_color=color.new(#089981, 50))
         tp2_box := box.new(left=bar_index, top=tp2_p, right=bar_index + 1, bottom=tp1_p, bgcolor=color.new(#089981, 85), border_color=color.new(#089981, 50))
 
-// Active Long Management
+// Manage Active Long
 if strategy.position_size > 0
     if not tp1_hit and high >= tp1_p
         tp1_hit := true
         if use_trail
             sl_p := entry_p // Move stop to Break-Even
-            
+
     if tp1_hit and use_trail
         new_trail = high - trail_dist
         if new_trail > sl_p
-            sl_p := new_trail 
-            
+            sl_p := new_trail
+
     strategy.exit("TP1", "Long", qty=qty1, stop=sl_p, limit=tp1_p)
     strategy.exit("TP2", "Long", stop=sl_p, limit=tp2_p)
-    
-    if not na(sl_box)
-        box.set_bottom(sl_box, sl_p) 
 
-// --- SELL ORDER LOGIC ---
+    if not na(sl_box)
+        box.set_bottom(sl_box, sl_p)
+
+// --- SHORT ENTRY ---
 if sell_signal
-    wait_for_fvg_bear := false
-    entry_p := close
-    sl_p    := entry_p + sl_distance
-    tp1_p   := entry_p - (sl_distance * tp1_ratio)
-    tp2_p   := entry_p - (sl_distance * tp2_ratio)
-    tp1_hit := false
-    
-    strategy.entry("Short", strategy.short, qty=actual_qty)
+    entry_p    := close
+    sl_p       := entry_p + sl_distance
+    tp1_p      := entry_p - (sl_distance * tp1_ratio)
+    tp2_p      := entry_p - (sl_distance * tp2_ratio)
+    target_qty := calc_order_qty()
+    qty1       := target_qty * (scale_pct / 100.0)
+    qty2       := target_qty - qty1
+    tp1_hit    := false
+
+    strategy.entry("Short", strategy.short, qty=target_qty)
     strategy.exit("TP1", "Short", qty=qty1, stop=sl_p, limit=tp1_p)
     strategy.exit("TP2", "Short", stop=sl_p, limit=tp2_p)
-    
-    conf = get_confidence(false)
-    lbl_text = str.tostring(conf) + "% SELL\nSL: " + str.tostring(sl_p, "#.##") + "\nTP1: " + str.tostring(tp1_p, "#.##")
-    label.new(bar_index, high + atr_val, text=lbl_text, style=label.style_label_down, color=color.new(#f23645, 0), textcolor=color.white, size=size.small)
-    
+
+    label.new(bar_index, high + atr_val, text="SELL\nSL: " + str.tostring(sl_p, "#.##") + "\nTP1: " + str.tostring(tp1_p, "#.##"), 
+              style=label.style_label_down, color=color.new(#f23645, 0), textcolor=color.white, size=size.small)
+
     if show_boxes
         sl_box  := box.new(left=bar_index, top=sl_p, right=bar_index + 1, bottom=entry_p, bgcolor=color.new(color.red, 80), border_color=color.new(color.red, 50))
         tp1_box := box.new(left=bar_index, top=entry_p, right=bar_index + 1, bottom=tp1_p, bgcolor=color.new(#089981, 70), border_color=color.new(#089981, 50))
         tp2_box := box.new(left=bar_index, top=tp1_p, right=bar_index + 1, bottom=tp2_p, bgcolor=color.new(#089981, 85), border_color=color.new(#089981, 50))
 
-// Active Short Management
+// Manage Active Short
 if strategy.position_size < 0
     if not tp1_hit and low <= tp1_p
         tp1_hit := true
         if use_trail
             sl_p := entry_p // Move stop to Break-Even
-            
+
     if tp1_hit and use_trail
         new_trail = low + trail_dist
         if new_trail < sl_p
-            sl_p := new_trail 
-            
+            sl_p := new_trail
+
     strategy.exit("TP1", "Short", qty=qty1, stop=sl_p, limit=tp1_p)
     strategy.exit("TP2", "Short", stop=sl_p, limit=tp2_p)
-    
-    if not na(sl_box)
-        box.set_top(sl_box, sl_p) 
 
-// Extend Risk/Reward visual boxes
+    if not na(sl_box)
+        box.set_top(sl_box, sl_p)
+
+// Extend boxes while active
 if strategy.position_size != 0
     if not na(sl_box)
         box.set_right(sl_box, bar_index)
@@ -420,24 +317,24 @@ if show_dashboard and barstate.islast
     total_trades = strategy.closedtrades
     win_trades   = strategy.wintrades
     loss_trades  = strategy.losstrades
-    
+
     win_rate  = total_trades > 0 ? (win_trades / total_trades) * 100 : 0.0
     loss_rate = total_trades > 0 ? (loss_trades / total_trades) * 100 : 0.0
     net_prof  = strategy.netprofit
     max_dd    = strategy.max_drawdown
-    
+
     table.cell(stats_table, 0, 0, "Strategy Stats", text_color=color.white, text_size=size.small, text_halign=text.align_left, bgcolor=color.new(color.blue, 60))
     table.cell(stats_table, 1, 0, "Value", text_color=color.white, text_size=size.small, text_halign=text.align_right, bgcolor=color.new(color.blue, 60))
-    
+
     table.cell(stats_table, 0, 1, "Total Trades", text_color=color.white, text_size=size.small, text_halign=text.align_left)
     table.cell(stats_table, 1, 1, str.tostring(total_trades), text_color=color.white, text_size=size.small, text_halign=text.align_right)
-    
+
     table.cell(stats_table, 0, 2, "Win Rate", text_color=color.white, text_size=size.small, text_halign=text.align_left)
     table.cell(stats_table, 1, 2, str.tostring(win_rate, "#.##") + "%", text_color=win_rate >= 50 ? color.new(#089981, 0) : color.new(#f23645, 0), text_size=size.small, text_halign=text.align_right)
-    
+
     table.cell(stats_table, 0, 3, "Loss Rate", text_color=color.white, text_size=size.small, text_halign=text.align_left)
     table.cell(stats_table, 1, 3, str.tostring(loss_rate, "#.##") + "%", text_color=color.new(#f23645, 0), text_size=size.small, text_halign=text.align_right)
-    
+
     table.cell(stats_table, 0, 4, "Net Profit", text_color=color.white, text_size=size.small, text_halign=text.align_left)
     table.cell(stats_table, 1, 4, "$" + str.tostring(net_prof, "#.##"), text_color=net_prof > 0 ? color.new(#089981, 0) : color.new(#f23645, 0), text_size=size.small, text_halign=text.align_right)
 
