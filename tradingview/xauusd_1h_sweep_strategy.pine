@@ -21,14 +21,20 @@ strategy("Merged 1H Sweep + Pro Management [Optimized]",
          initial_capital=5000, 
          default_qty_type=strategy.fixed, 
          default_qty_value=10, 
-         margin_long=10, 
-         margin_short=10, 
+         margin_long=0, 
+         margin_short=0, 
          process_orders_on_close=false,
          max_labels_count=500, 
          max_boxes_count=500, 
          max_lines_count=500)
 
 // ============================ INPUTS ============================
+// --- Date Range Filter ---
+grpD           = "Backtest Date Filter"
+use_date_range = input.bool(false, "Filter Date Range", group=grpD)
+start_date     = input.time(timestamp("2020-01-01 00:00"), "Start Date", group=grpD)
+end_date       = input.time(timestamp("2030-01-01 00:00"), "End Date", group=grpD)
+
 // --- Risk & Sizing ---
 account_size  = input.float(5000.0, "Account Size ($)", group="Risk Management")
 lot_size      = input.float(0.1, "Fixed Lot Size", group="Risk Management")
@@ -45,7 +51,7 @@ max_daily_loss = input.int(2, "Max Consecutive Daily Losses", group="Trade Manag
 close_friday   = input.bool(true, "Close All Trades Friday at 16:00", group="Trade Management")
 
 // --- Filters & Strategy ---
-use_session    = input.bool(true, "Use Trading Session Filter", group="Filters")
+use_session    = input.bool(false, "Use Trading Session Filter", group="Filters", tooltip="Disable to allow trades 24/5 (matches best backtest params). Enable to restrict to NY hours.")
 trading_hours  = input.session("0300-1200", "Trading Hours (NY Time)", group="Filters")
 session_tz     = input.string("America/New_York", "Timezone", group="Filters")
 
@@ -204,7 +210,9 @@ if enable_vp and barstate.isconfirmed
 plot(enable_vp and showLvl and not sessNew ? pPoc : na, "Prev POC", color.new(#ff1744, 20), 2, plot.style_linebr)
 
 // ============================ STRATEGY SIGNALS ============================
-in_session = use_session ? not na(time(timeframe.period, trading_hours, session_tz)) : true
+in_date_range = not use_date_range or (time >= start_date and time <= end_date)
+in_session    = use_session ? not na(time(timeframe.period, trading_hours, session_tz)) : true
+can_enter     = in_date_range and in_session and strategy.position_size == 0 and can_trade and not is_friday_close
 
 htf_high = request.security(syminfo.tickerid, htf, high[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
 htf_low  = request.security(syminfo.tickerid, htf, low[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
@@ -280,8 +288,8 @@ short_trend = not use_bias or (not na(bias_ema) and close < bias_ema)
 long_chase  = max_chase_atr <= 0 or (not na(armed_bull_extreme) and (close - armed_bull_extreme) <= (atr_val * max_chase_atr))
 short_chase = max_chase_atr <= 0 or (not na(armed_bear_extreme) and (armed_bear_extreme - close) <= (atr_val * max_chase_atr))
 
-bull_setup  = wait_for_fvg_bull and fvg_bull and vol_cond and in_session and strategy.position_size == 0 and can_trade and not is_friday_close
-bear_setup  = wait_for_fvg_bear and fvg_bear and vol_cond and in_session and strategy.position_size == 0 and can_trade and not is_friday_close
+bull_setup  = wait_for_fvg_bull and fvg_bull and vol_cond and can_enter
+bear_setup  = wait_for_fvg_bear and fvg_bear and vol_cond and can_enter
 
 buy_signal  = bull_setup and long_trend and long_chase
 sell_signal = bear_setup and short_trend and short_chase
