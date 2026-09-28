@@ -1,0 +1,94 @@
+# Chart timeframe is not a Pine input. The script is written for a 5-minute chart.
+# Friday 16:00 flattening and the daily loss reset use this timezone (UTC).
+
+data:
+  instrument: xauusd
+  price_type: bid
+  date_from: "2015-01-01"
+  date_to: now
+  # Raw download. 5m/15m/1h are resampled from m1, so leave this as m1 unless
+  # you also want those files saved beside it.
+  download_timeframes: ["m1"]
+  chart_timeframe: "5min"
+  timezone: "UTC"
+  include_flats: true
+  raw_dir: data/raw
+  processed_dir: data/processed
+
+broker:
+  # Full bid/ask spread in USD. Data is bid, so buys pay the spread and sells do not.
+  spread: 0.30
+  slippage: 0.0
+  commission_per_unit: 0.0
+  margin_pct: 10.0
+
+# Keys match the Pine input() identifiers, in the same order.
+strategy:
+  account_size: 5000.0
+  lot_size: 0.1
+  units_per_lot: 100.0
+  atr_sl_mult: 2.0
+  tp1_ratio: 1.0
+  tp2_ratio: 2.0
+  scale_pct: 50
+  use_trail: true
+  max_daily_loss: 2
+  close_friday: true
+  use_session: true
+  # London open through the New York morning. Overnight and Sunday trades were the drawdown.
+  trading_hours: "0300-1200"
+  session_tz: "America/New_York"
+  use_vol: true
+  vol_length: 14
+  # Skip a fair-value gap that has already run this many ATRs away from the sweep wick.
+  # Only take longs above the daily EMA and shorts below it.
+  use_bias: true
+  bias_tf: "D"
+  bias_length: 20
+  max_chase_atr: 0.75
+  htf: "60"
+  swing_len: 3
+  fvg_timeout: 12
+  show_boxes: true
+  # Visual only. The volume profile and confidence score do not change orders.
+  sessDef: "Chart day"
+  sessHour: 0
+  sessTz: "Exchange"
+  vpRows: 60
+  vaPct: 70.0
+  useLtf: true
+  ltfTf: "1"
+  showLvl: true
+
+# Hardcoded in the Pine script. They are not input() fields.
+fixed:
+  atr_length: 14
+  trail_atr_mult: 1.5
+  chart_timezone: "UTC"
+
+optimize:
+  method: grid          # grid or random
+  n_random: 200
+  seed: 7
+  rank_by: sharpe       # sharpe or profit_factor
+  min_trades: 30
+  workers: 0            # 0 = all CPUs
+  overfit_peak_ratio: 1.5
+  heatmap:
+    x: atr_sl_mult
+    y: tp2_ratio
+  walk_forward:
+    in_sample_days: 365
+    out_sample_days: 90
+    step_days: 90
+    min_trades: 10
+    warmup_days: 20
+  ranges:
+    atr_sl_mult: [1.5, 2.0, 2.5]
+    tp2_ratio: [2.0, 2.5, 3.0]
+    swing_len: [3, 5, 7]
+    fvg_timeout: [10, 15, 25]
+    vol_length: [14, 20, 30]
+
+output:
+  directory: results

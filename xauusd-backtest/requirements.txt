@@ -1,0 +1,6 @@
+pandas>=2.0,<2.3
+numpy>=1.24,<2.1
+pyarrow>=14,<18
+PyYAML>=6,<7
+matplotlib>=3.7,<3.10
+pytest>=7,<9
