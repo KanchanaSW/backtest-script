@@ -1,0 +1,15 @@
+{
+  "net_profit": 158.94792863525345,
+  "realized_profit": 158.94792863526706,
+  "win_rate": 0.56,
+  "profit_factor": 1.3594610535743379,
+  "sharpe": 4.056354261543754,
+  "max_drawdown": 130.5283944952298,
+  "max_drawdown_pct": 0.024924108994635406,
+  "trades": 50,
+  "average_trade": 3.178958572705341,
+  "expectancy": 3.178958572705344,
+  "final_equity": 5158.947928635253,
+  "open_side": "flat",
+  "open_qty": 0.0
+}

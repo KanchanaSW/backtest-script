@@ -75,6 +75,15 @@ show_boxes     = input.bool(true, "Draw Risk/Reward Boxes", group=grpVis)
 show_dashboard = input.bool(true, "Show Performance Dashboard", group=grpVis)
 
 // ============================ CALCULATIONS ============================
+// Dynamic price formatter for multi-asset display (Forex 5 decimals, Gold/Crypto/Indices 2 decimals)
+format_price(float p) =>
+    if syminfo.mintick < 0.001
+        str.tostring(p, "#.#####")
+    else if syminfo.mintick < 0.1
+        str.tostring(p, "#.##")
+    else
+        str.tostring(p, "#.#")
+        
 // Order quantity calculation based on user selection
 calc_order_qty() =>
     qty = 1.0
@@ -258,15 +267,18 @@ if buy_signal
     qty2       := target_qty - qty1
     tp1_hit    := false
 
-    strategy.entry("Long", strategy.long, qty=target_qty)
+    long_msg = "BUY " + syminfo.ticker + " @ " + format_price(close) + " | SL: " + format_price(sl_p) + " | TP1: " + format_price(tp1_p)
+    alert(long_msg, alert.freq_once_per_bar_close)
+
+    strategy.entry("Long", strategy.long, qty=target_qty, alert_message=long_msg)
 
     if exit_mode == "Single Target (High Win Rate)"
-        strategy.exit("TP-All", "Long", stop=sl_p, limit=tp1_p)
+        strategy.exit("TP-All", "Long", stop=sl_p, limit=tp1_p, alert_message="Close Long " + syminfo.ticker)
     else
-        strategy.exit("TP1", "Long", qty=qty1, stop=sl_p, limit=tp1_p)
-        strategy.exit("TP2", "Long", stop=sl_p, limit=tp2_p)
+        strategy.exit("TP1", "Long", qty=qty1, stop=sl_p, limit=tp1_p, alert_message="TP1 Long " + syminfo.ticker)
+        strategy.exit("TP2", "Long", stop=sl_p, limit=tp2_p, alert_message="TP2 Long " + syminfo.ticker)
 
-    label.new(bar_index, low - atr_val, text="BUY\nSL: " + str.tostring(sl_p, "#.##") + "\nTP: " + str.tostring(tp1_p, "#.##"), 
+    label.new(bar_index, low - atr_val, text="BUY\nSL: " + format_price(sl_p) + "\nTP: " + format_price(tp1_p), 
               style=label.style_label_up, color=color.new(#089981, 0), textcolor=color.white, size=size.small)
 
     if show_boxes
@@ -287,8 +299,8 @@ if strategy.position_size > 0 and exit_mode == "Partial Scale-Out"
         if new_trail > sl_p
             sl_p := new_trail
 
-    strategy.exit("TP1", "Long", qty=qty1, stop=sl_p, limit=tp1_p)
-    strategy.exit("TP2", "Long", stop=sl_p, limit=tp2_p)
+    strategy.exit("TP1", "Long", qty=qty1, stop=sl_p, limit=tp1_p, alert_message="TP1 Long " + syminfo.ticker)
+    strategy.exit("TP2", "Long", stop=sl_p, limit=tp2_p, alert_message="TP2 Long " + syminfo.ticker)
 
     if not na(sl_box)
         box.set_bottom(sl_box, sl_p)
@@ -316,15 +328,18 @@ if sell_signal
     qty2       := target_qty - qty1
     tp1_hit    := false
 
-    strategy.entry("Short", strategy.short, qty=target_qty)
+    short_msg = "SELL " + syminfo.ticker + " @ " + format_price(close) + " | SL: " + format_price(sl_p) + " | TP1: " + format_price(tp1_p)
+    alert(short_msg, alert.freq_once_per_bar_close)
+
+    strategy.entry("Short", strategy.short, qty=target_qty, alert_message=short_msg)
 
     if exit_mode == "Single Target (High Win Rate)"
-        strategy.exit("TP-All", "Short", stop=sl_p, limit=tp1_p)
+        strategy.exit("TP-All", "Short", stop=sl_p, limit=tp1_p, alert_message="Close Short " + syminfo.ticker)
     else
-        strategy.exit("TP1", "Short", qty=qty1, stop=sl_p, limit=tp1_p)
-        strategy.exit("TP2", "Short", stop=sl_p, limit=tp2_p)
+        strategy.exit("TP1", "Short", qty=qty1, stop=sl_p, limit=tp1_p, alert_message="TP1 Short " + syminfo.ticker)
+        strategy.exit("TP2", "Short", stop=sl_p, limit=tp2_p, alert_message="TP2 Short " + syminfo.ticker)
 
-    label.new(bar_index, high + atr_val, text="SELL\nSL: " + str.tostring(sl_p, "#.##") + "\nTP: " + str.tostring(tp1_p, "#.##"), 
+    label.new(bar_index, high + atr_val, text="SELL\nSL: " + format_price(sl_p) + "\nTP: " + format_price(tp1_p), 
               style=label.style_label_down, color=color.new(#f23645, 0), textcolor=color.white, size=size.small)
 
     if show_boxes
@@ -345,8 +360,8 @@ if strategy.position_size < 0 and exit_mode == "Partial Scale-Out"
         if new_trail < sl_p
             sl_p := new_trail
 
-    strategy.exit("TP1", "Short", qty=qty1, stop=sl_p, limit=tp1_p)
-    strategy.exit("TP2", "Short", stop=sl_p, limit=tp2_p)
+    strategy.exit("TP1", "Short", qty=qty1, stop=sl_p, limit=tp1_p, alert_message="TP1 Short " + syminfo.ticker)
+    strategy.exit("TP2", "Short", stop=sl_p, limit=tp2_p, alert_message="TP2 Short " + syminfo.ticker)
 
     if not na(sl_box)
         box.set_top(sl_box, sl_p)
