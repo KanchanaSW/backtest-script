@@ -1,0 +1,45 @@
+# 20/50 EMA + Pro Management — 15-minute XAUUSD
+
+data:
+  instrument: xauusd
+  price_type: bid
+  date_from: "2015-01-01"
+  date_to: now
+  download_timeframes: ["m1"]
+  chart_timeframe: "15min"
+  timezone: "UTC"
+  include_flats: true
+  raw_dir: data/raw
+  processed_dir: data/processed
+
+broker:
+  spread: 0.30
+  slippage: 0.0
+  commission_per_unit: 0.0
+  margin_pct: 10.0
+
+strategy:
+  account_size: 10000.0
+  qty_pct: 10.0
+  fast_len: 20
+  slow_len: 50
+  trend_len: 200
+  atr_mult: 2.0
+  atr_length: 14
+  tp1_ratio: 0.8
+  tp2_ratio: 2.0
+  scale_pct: 50
+  use_trail: true
+  trail_atr_mult: 1.0
+  be_offset: 0.30
+  use_session: true
+  trading_hours: "0300-1600"
+  session_tz: "America/New_York"
+  close_friday: true
+
+fixed:
+  atr_length: 14
+  chart_timezone: "UTC"
+
+output:
+  directory: results_ema
